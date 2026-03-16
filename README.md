@@ -12,6 +12,8 @@ pip install faster-qwen3-tts
 
 **PyTorch compatibility note:** CUDA-graph capture in the fast path is not reliable on `torch<=2.5.0` for this project (capture can fail with "operation not permitted when stream is capturing"). We validated `2.5.1+` as working and set that as the minimum supported version.
 
+**Blackwell note:** RTX 50xx / Blackwell GPUs need CUDA 12.8 PyTorch wheels. If the default setup fails on those cards, install a `cu128` PyTorch build (PyTorch 2.7+).
+
 ## Quick Start
 
 ### Python
@@ -113,6 +115,38 @@ python demo/server.py
 ```
 
 Features: voice clone (upload any WAV or use your microphone), voice design (1.7B-VoiceDesign model), streaming/non-streaming toggle, adjustable chunk size, live TTFA/RTF metrics, WAV download.
+
+### Docker (Blackwell / RTX 50xx)
+
+For Blackwell GPUs (RTX 5060, 5070, 5080, 5090), use the dedicated Dockerfile with CUDA 12.8:
+
+```bash
+# Build
+docker build -f Dockerfile.blackwell -t faster-qwen3-tts:blackwell .
+
+# Run OpenAI-compatible API (default)
+docker run --gpus all --rm -p 8000:8000 \
+  -v ~/.cache/huggingface:/cache \
+  -v $(pwd)/ref_audio.wav:/app/ref_audio.wav:ro \
+  faster-qwen3-tts:blackwell
+
+# Run Demo UI
+docker run --gpus all --rm -p 7860:7860 \
+  -v ~/.cache/huggingface:/cache \
+  -e ENTRY_MODE=demo \
+  faster-qwen3-tts:blackwell
+
+# Or use docker-compose
+docker compose -f docker-compose.blackwell.yml up --build
+```
+
+Pre-download models before first run to avoid long startup times:
+```bash
+pip install huggingface_hub
+python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base')"
+```
+
+**Note:** Flash Attention is not yet supported on Blackwell and is automatically disabled.
 
 ### OpenAI-compatible API server
 

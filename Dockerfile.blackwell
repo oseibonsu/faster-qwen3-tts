@@ -1,0 +1,144 @@
+# Dockerfile for Blackwell GPUs (RTX 50xx series)
+# Uses CUDA 12.8 + PyTorch 2.7+ with cu128 wheels
+#
+# Build:
+#   docker build -f Dockerfile.blackwell -t faster-qwen3-tts:blackwell .
+#
+# Run (OpenAI-compatible API):
+#   docker run --gpus all --rm -p 8000:8000 \
+#     -v ~/.cache/huggingface:/cache \
+#     -v $(pwd)/ref_audio.wav:/app/ref_audio.wav:ro \
+#     faster-qwen3-tts:blackwell
+#
+# Run (Demo UI):
+#   docker run --gpus all --rm -p 7860:7860 \
+#     -v ~/.cache/huggingface:/cache \
+#     -e ENTRY_MODE=demo \
+#     faster-qwen3-tts:blackwell
+
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies and Python 3.12 from deadsnakes PPA
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    git \
+    wget \
+    curl \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python
+
+# Set working directory
+WORKDIR /app
+
+# Create and activate virtual environment
+ENV VIRTUAL_ENV=/app/.venv
+RUN python -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install PyTorch with CUDA 12.8 support (Blackwell compatible)
+RUN pip install --no-cache-dir \
+    "torch>=2.7.0" \
+    "torchaudio>=2.7.0" \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Copy project files and install faster-qwen3-tts with demo extras
+COPY pyproject.toml README.md MANIFEST.in ./
+COPY faster_qwen3_tts/ ./faster_qwen3_tts/
+COPY examples/ ./examples/
+COPY demo/ ./demo/
+
+RUN pip install --no-cache-dir -e ".[demo]"
+
+# Install additional demo dependencies
+RUN pip install --no-cache-dir -r demo/requirements.txt 2>/dev/null || true
+
+# Install Flash Attention 2 (optional — usually fails on Blackwell, that's OK)
+RUN pip install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
+    echo "Flash Attention not available (expected on Blackwell), continuing without it"
+
+# Create directories for cache
+RUN mkdir -p /cache
+
+# Set default environment variables
+ENV HF_HOME=/cache
+ENV TRANSFORMERS_CACHE=/cache
+ENV HUGGINGFACE_HUB_CACHE=/cache
+ENV TORCH_HOME=/cache/torch
+
+# Model configuration
+ENV QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+ENV QWEN_TTS_LANGUAGE=English
+
+# Entry mode: "api" (default, OpenAI-compatible server) or "demo" (Gradio-like web UI)
+ENV ENTRY_MODE=api
+
+# API server settings
+ENV API_HOST=0.0.0.0
+ENV API_PORT=8000
+
+# Demo server settings
+ENV DEMO_HOST=0.0.0.0
+ENV DEMO_PORT=7860
+
+# Expose ports
+EXPOSE 8000
+EXPOSE 7860
+
+# Health check (for API mode)
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5m --retries=3 \
+    CMD curl -f http://localhost:${API_PORT}/health 2>/dev/null || \
+        curl -f http://localhost:${DEMO_PORT}/ 2>/dev/null || exit 1
+
+# Entrypoint script
+COPY <<'EOF' /app/entrypoint.sh
+#!/bin/bash
+set -e
+
+echo "=== Faster Qwen3-TTS (Blackwell) ==="
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')" 2>/dev/null || true
+python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}')" 2>/dev/null || true
+
+if [ "$ENTRY_MODE" = "demo" ]; then
+    echo "Starting Demo UI on port ${DEMO_PORT}..."
+    exec python demo/server.py --host "$DEMO_HOST" --port "$DEMO_PORT"
+else
+    echo "Starting OpenAI-compatible API on port ${API_PORT}..."
+    # Build command with optional ref-audio
+    CMD="python examples/openai_server.py --host $API_HOST --port $API_PORT"
+    CMD="$CMD --model $QWEN_TTS_MODEL --language $QWEN_TTS_LANGUAGE"
+
+    if [ -n "$QWEN_TTS_REF_AUDIO" ] && [ -f "$QWEN_TTS_REF_AUDIO" ]; then
+        CMD="$CMD --ref-audio $QWEN_TTS_REF_AUDIO"
+        [ -n "$QWEN_TTS_REF_TEXT" ] && CMD="$CMD --ref-text \"$QWEN_TTS_REF_TEXT\""
+    elif [ -f "/app/ref_audio.wav" ]; then
+        CMD="$CMD --ref-audio /app/ref_audio.wav"
+    else
+        echo "WARNING: No reference audio found. Mount one with -v ./ref_audio.wav:/app/ref_audio.wav:ro"
+        echo "  or set QWEN_TTS_REF_AUDIO=/path/to/audio.wav"
+    fi
+
+    if [ -n "$QWEN_TTS_VOICES" ] && [ -f "$QWEN_TTS_VOICES" ]; then
+        CMD="$CMD --voices $QWEN_TTS_VOICES"
+    fi
+
+    exec bash -c "$CMD"
+fi
+EOF
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]

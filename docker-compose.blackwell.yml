@@ -1,6 +1,6 @@
 # Docker Compose for Blackwell GPUs (RTX 50xx)
 #
-# Usage:
+# Build & run:
 #   docker compose -f docker-compose.blackwell.yml up --build
 #
 # Pre-download models first (recommended):
@@ -8,36 +8,33 @@
 #   python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base')"
 
 services:
-  tts-api:
+  faster-qwen3-tts:
     build:
       context: .
       dockerfile: Dockerfile.blackwell
-    ports:
-      - "${API_PORT:-8000}:8000"
-      - "${DEMO_PORT:-7860}:7860"
-    volumes:
-      # HuggingFace model cache — pre-download models to avoid long first-run
-      - "${HF_CACHE:-~/.cache/huggingface}:/cache"
-      # Reference audio for voice cloning (mount your own)
-      - "${REF_AUDIO:-./ref_audio.wav}:/app/ref_audio.wav:ro"
+    image: faster-qwen3-tts:blackwell
+    container_name: faster-qwen3-tts
+    user: "root"
+    stdin_open: true
+    tty: true
+    network_mode: host
+    runtime: nvidia
     environment:
-      - ENTRY_MODE=${ENTRY_MODE:-api}
-      - QWEN_TTS_MODEL=${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}
-      - QWEN_TTS_LANGUAGE=${QWEN_TTS_LANGUAGE:-English}
-      - QWEN_TTS_REF_AUDIO=${QWEN_TTS_REF_AUDIO:-}
-      - QWEN_TTS_REF_TEXT=${QWEN_TTS_REF_TEXT:-}
-      - NVIDIA_VISIBLE_DEVICES=all
+      ENTRY_MODE: "api"
+      API_PORT: "8000"
+      DEMO_PORT: "7860"
+      QWEN_TTS_MODEL: "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+      QWEN_TTS_LANGUAGE: "English"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    volumes:
+      - ~/.cache/huggingface:/cache
+      - ./ref_audio.wav:/app/ref_audio.wav:ro
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 30s
-      start_period: 300s
-      retries: 3
